@@ -761,6 +761,13 @@ def getbeam(imagefile=None, beamfile=None):
     nimg = len(imagefile)
     for n in range(nimg):
         img = imagefile[n]
+        if img is None:
+            bmaj.append(None)
+            bmin.append(None)
+            bpa.append(None)
+            beamunit.append(None)
+            bpaunit.append(None)
+            chans.append(None)
         bmaj_ = []
         bmin_ = []
         bpa_ = []
@@ -884,6 +891,9 @@ def imreg(vis=None, imagefile=None, timerange=None,
     if not fitsfile:
         fitsfile = []
         for img in imagefile:
+            if img is None:
+                fitsfile.append(None)
+                continue
             if os.path.isdir(img):
                 # input is CASA image
                 fitsfile.append(img + '.fits')
@@ -923,6 +933,8 @@ def imreg(vis=None, imagefile=None, timerange=None,
     for n, img in enumerate(imagefile):
         if verbose:
             print('processing image #' + str(n) + ' ' + img)
+        if img is None:
+            continue
         fitsf = fitsfile[n]
         timeran = timerange[n]
         # obtain duration of the image as FITS header exptime
@@ -1125,6 +1137,16 @@ def imreg(vis=None, imagefile=None, timerange=None,
                 print('STOKES Information does not seem to exist! Assuming Stokes I')
                 stokenum = 1
 
+            keys = list(header.keys())
+            values = list(header.values())
+            # which axis is frequency?
+            faxis = keys[values.index('FREQ')][-1]
+            faxis_ind = ndim - int(faxis)
+            # insert the frequency axis information into the header as they may be stripped off if FITS compressed.
+            header['REFFRQ'] = header['CRVAL' + faxis]
+            header['DLTFRQ'] = header['CDELT' + faxis]
+            header['FQUNIT'] = header['CUNIT' + faxis]
+
             data = hdu[0].data  # remember the data order is reversed due to the FITS convension
             # intensity units to brightness temperature
             if toTb:
@@ -1134,11 +1156,6 @@ def imreg(vis=None, imagefile=None, timerange=None,
                 beamunit = beamunits[n]
                 bpa = bpas[n]
                 bpaunit = bpaunits[n]
-                keys = list(header.keys())
-                values = list(header.values())
-                # which axis is frequency?
-                faxis = keys[values.index('FREQ')][-1]
-                faxis_ind = ndim - int(faxis)
                 # find out the polarization of this image
                 k_b = qa.constants('k')['value']
                 c_l = qa.constants('c')['value']
@@ -1215,7 +1232,7 @@ def imreg(vis=None, imagefile=None, timerange=None,
                 header = hdu[0].header
                 data = hdu[0].data
                 ndfits.write(fitsf, data, header, compression_type='RICE_1',
-                                               quantize_level=4.0)
+                             quantize_level=4.0)
                 os.system("rm -rf {}".format(fitsftmp))
     if deletehistory:
         ms_restorehistory(vis)
@@ -1320,3 +1337,53 @@ def calc_phasecenter_from_solxy(vis, timerange='', xycen=None, usemsphacenter=Tr
         newdec = dec0 + decoff
         phasecenter = 'J2000 ' + str(newra) + 'rad ' + str(newdec) + 'rad'
     return phasecenter, midtim
+
+
+from astropy.coordinates import SkyCoord, EarthLocation
+from astropy import units as u
+from astropy.io import fits
+import sunpy.map
+from sunpy.coordinates import frames, sun
+
+def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLocation(lat=37.232259*u.deg, lon=-118.28479*u.deg)):
+    """
+        composing a sunpy compatible fits from a fits file with RA and DEC in the header
+        using location of OVSA as example
+
+
+        :param fits_in: input fits file
+        :param helio_sunpy_fits_name: output fits file name, if None, the output file will be named as fits_in.replace('.fits', '_heliosunpy.fits')
+        :param obs_loc: location of the observer, default is OVSA
+    """
+
+    hdu = fits.open(fits_in)
+    header = hdu[0].header
+    obstime = Time(header['date-obs'])
+
+    data = hdu[0].data[0, 0, :, :]
+    frequency = header['crval3']*u.Hz
+    obs_gcrs = SkyCoord(obs_loc.get_gcrs(obstime))
+    reference_coord = SkyCoord(header['crval1']*u.Unit(header['cunit1']),
+            header['crval2']*u.Unit(header['cunit2']),frame='gcrs',obstime=obstime,
+            obsgeoloc=obs_gcrs.cartesian, obsgeovel=obs_gcrs.velocity.to_cartesian(),
+            distance=obs_gcrs.hcrs.distance)
+    reference_coord_arcsec = reference_coord.transform_to(frames.Helioprojective(observer=obs_gcrs))
+    cdelt1 = (np.abs(header['cdelt1'])*u.deg).to(u.arcsec)
+    cdelt2 = (np.abs(header['cdelt2'])*u.deg).to(u.arcsec)
+    P1 = sun.P(obstime)
+    new_header = sunpy.map.make_fitswcs_header(data, reference_coord_arcsec,
+        reference_pixel=u.Quantity([header['crpix1']-1, header['crpix2']-1]*u.pixel),
+        scale=u.Quantity([cdelt1, cdelt2]*u.arcsec/u.pix), wavelength=3e8/frequency.to(u.Hz).value*u.m,
+        rotation_angle=-P1, observatory='obs')
+    obsview_map = sunpy.map.Map(data, new_header)
+    fov_x = new_header["naxis1"]*cdelt1
+    fov_y = new_header["naxis2"]*cdelt2
+
+    obsview_map_rotate = obsview_map.rotate()
+    bl = SkyCoord(-fov_x/2, -fov_y/2, frame=obsview_map_rotate.coordinate_frame)
+    tr = SkyCoord(fov_x/2,  fov_y/2,  frame=obsview_map_rotate.coordinate_frame)
+    obsview_submap = obsview_map_rotate.submap(bl, top_right=tr)
+
+    if helio_sunpy_fits_name is None:
+        helio_sunpy_fits_name = fits_in.replace('.fits', '_heliosunpy.fits')
+    obsview_submap.save(helio_sunpy_fits_name, overwrite=True)
