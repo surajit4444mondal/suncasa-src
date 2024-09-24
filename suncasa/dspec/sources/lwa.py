@@ -98,8 +98,8 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
         if not (bkg_file is None): 
             try:
                 out = pd.read_csv(bkg_file)
-                bkg_flux = out['bkg_flux']
-                print('Using the provided raw aackground flux csv file.')
+                bkg_flux = np.array(out['bkg_flux'])
+                print('Using the provided raw background flux csv file.')
             except:
                 print('Failed in reading the background flux csv file. Setting background flux to zero.')
         else:
@@ -138,7 +138,6 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
             ti1=len(times_mjd)
 
         firstset_read = True
-
         times_mjd = times_mjd[ti0:ti1] 
 
         # Select frequency range
