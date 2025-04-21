@@ -192,6 +192,10 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
                 pbfacs = np.ones_like(times_mjd)
                 t0 = times_mjd[0]
                 t1 = times_mjd[-1]
+                j=1
+                while t1<t0:
+                    t1=times_mjd[-1-j]
+                    j+=1
                 if t1-t0 > 5./1440.:
                     nstep = int((t1-t0)/(5./1440.))
                     ts_ref = np.linspace(t0, t1, nstep)
