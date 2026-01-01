@@ -313,6 +313,7 @@ class Dspec:
                     self.telescope = 'EOVSA'
                     self.observatory = 'OVRO'
 
+
             if source.lower() == 'suncasa':
                 spec, tim, freq, bl, pol, spec_unit = self.rd_dspec(fname, spectype='amp', spec_unit='jy')
                 self.data = spec
@@ -324,7 +325,8 @@ class Dspec:
                 self.telescope = ''
                 self.observatory = ''
 
-            if source.lower() == 'lwa' and fname.endswith('.fits'):
+            if source.lower() == 'lwa':
+                if fname.endswith('.fits'):
                     hdu = fits.open(fname) 
                     self.data = hdu[0].data
                     tim = hdu[2].data
@@ -335,6 +337,34 @@ class Dspec:
                     self.spec_unit = 'sfu'
                     self.telescope = 'LWA'
                     self.observatory = 'OVRO'
+                else:
+                    from .sources import lwa
+                    spec, tim, freq, pol, calfac_x, calfac_y, bkg_flux = lwa.read_data(fname, **kwargs)
+                    self.data = spec
+                    self.time_axis = Time(tim, format='mjd')
+                    self.freq_axis = freq
+                    self.pol = pol
+                    self.calfac_x = calfac_x # correction factor for X pol, same shape as freq
+                    self.calfac_y = calfac_y # correction factor for Y pol, same shape as freq
+                    self.bkg_flux = bkg_flux
+                    self.spec_unit = 'sfu'
+                    self.telescope = 'LWA'
+                    self.observatory = 'OVRO'
+
+            if source.lower() =='general' and (fname.endswith('.fits') or fname.endswith('.fts') or fname.endswith('.fit')):
+                hdu = fits.open(fname)
+                self.data = hdu[0].data
+                tim = hdu[2].data
+                tmjd = np.array(tim['mjd']) + np.array(tim['time']) / 24. / 3600 / 1000
+                self.time_axis = Time(tmjd, format='mjd')
+                self.freq_axis = hdu[1].data['sfreq'] * 1e9
+                self.pol = [hdu[0].header['POLARIZA']]
+                if 'BUNIT' in hdu[0].header:
+                    self.spec_unit = hdu[0].header['BUNIT']
+                if 'BNAME' in hdu[0].header:
+                    self.spec_name = hdu[0].header['BNAME']
+                self.telescope = hdu[0].header['TELESCOP']
+                self.observatory = ''
 
         elif source.lower() == 'lwa' and type(fname) is list:
             from .sources import lwa
@@ -349,7 +379,15 @@ class Dspec:
             self.spec_unit = 'sfu'
             self.telescope = 'LWA'
             self.observatory = 'OVRO'
-
+        elif source.lower()=='ecallisto':
+            from .sources import ecallisto
+            s = ecallisto.get_dspec(fname, doplot=False)
+            self.data = s['spectrogram']
+            self.time_axis = Time(s['time_axis'], format='mjd')
+            self.freq_axis = s['spectrum_axis'] * 1e6
+            self.spec_unit = 'sfu'
+            self.telescope = 'e-callisto'
+            self.observatory = 'e-callisto'
         else:
             raise ValueError(f"Unsupported data source or type provided: {source}")
 
@@ -452,7 +490,7 @@ class Dspec:
 
         # primary header
         prihdr = hdulist[0].header
-        prihdr.set('FILENAME', fitsfile)
+        prihdr.set('FILENAME', os.path.basename(fitsfile))
         prihdr.set('ORIGIN', 'NJIT', 'Location where file was made')
         prihdr.set('DATE', Time.now().isot, 'Date when file was made')
         prihdr.set('OBSERVER', observer, 'Who to appreciate/blame')
@@ -467,6 +505,13 @@ class Dspec:
         prihdr.set('YCEN', 0.0, 'Antenna pointing in arcsec from Sun center')
         prihdr.set('POLARIZA', 'I', 'Polarizations present')
         prihdr.set('RESOLUTI', 0.0, 'Resolution value')
+        if spec_unit.lower() in ['sfu', 'jy', 'mjy']:
+            prihdr.set('BTYPE', 'flx', 'Flux density')
+            prihdr.set('BNAME', 'Flux Density')
+        elif spec_unit.lower() in ['k']:
+            prihdr.set('BTYPE', 'Tb', 'Brightness temperature')
+            prihdr.set('BNAME', 'Brightness Temperature')
+        prihdr.set('BUNIT', spec_unit, 'Data units')
         # Write the file
         hdulist.writeto(fitsfile, overwrite=True)
 
@@ -1090,6 +1135,10 @@ class Dspec:
             spec_unit_print = 'K'
         if spec_unit.lower() == 'sfu':
             spec_unit_print = 's.f.u'
+        if hasattr(self, 'spec_name'):
+            spec_name = self.spec_name
+        else:
+            spec_name = 'Intensity'
 
         if spec.ndim == 2:
             nfreq, ntim = len(self.freq_axis), len(self.time_axis)
@@ -1250,7 +1299,7 @@ class Dspec:
                 divider = make_axes_locatable(ax)
                 cax_spec = divider.append_axes('right', size='1.5%', pad=0.05)
                 clb_spec = plt.colorbar(im, ax=ax, cax=cax_spec)
-                clb_spec.set_label('Intensity [{}]'.format(spec_unit_print))
+                clb_spec.set_label(f'{spec_name} [{spec_unit_print}]')
 
 
                 ax.set_ylabel('Frequency [{0:s}]'.format(freq_unit))
@@ -1289,7 +1338,7 @@ class Dspec:
                 elif pol == 'IV':
                     spec_plt_1 = I_plot
                     spec_plt_2 = V_plot
-                    cmap2 = 'gray'
+                    cmap2 = 'RdBu_r'
                     if (vmax2 is None) and (vmin2 is None):
                         vmax2 = np.nanmax(np.abs(spec_plt_2))
                         vmin2 = -vmax2
@@ -1302,7 +1351,7 @@ class Dspec:
                     # this is for Stokes I + polarization degree
                     spec_plt_1 = I_plot
                     spec_plt_2 = V_plot / I_plot
-                    cmap2 = 'gray'
+                    cmap2 = 'RdBu_r'
                     if (vmax2 is None) and (vmin2 is None):
                         vmax2 = 1.
                         vmin2 = -1.
@@ -1383,7 +1432,7 @@ class Dspec:
                 divider = make_axes_locatable(ax1)
                 cax_spec = divider.append_axes('right', size='1.5%', pad=0.05)
                 clb_spec = plt.colorbar(im, ax=ax1, cax=cax_spec)
-                clb_spec.set_label('Intensity [{}]'.format(spec_unit_print))
+                clb_spec.set_label(f'{spec_name} [{spec_unit_print}]')
 
 
                 ax1.set_ylabel('Frequency [{0:s}]'.format(freq_unit))
@@ -1446,7 +1495,7 @@ class Dspec:
                 if pol == 'IP':
                     clb_spec.set_label(polstr[1])
                 else:
-                    clb_spec.set_label('Intensity [{}]'.format(spec_unit_print))
+                    clb_spec.set_label(f'{spec_name} [{spec_unit_print}]')
 
                 locator = AutoDateLocator(minticks=2)
                 ax2.xaxis.set_major_locator(locator)

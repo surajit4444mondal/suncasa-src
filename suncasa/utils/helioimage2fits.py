@@ -86,7 +86,31 @@ def ms_restorehistory(msfile):
     os.system('mv {0}_bk {0}'.format(tb_history))
 
 
-def read_horizons(t0=None, dur=None, vis=None, observatory=None, verbose=False):
+def observatory_to_coord(observatory):
+    """
+    Function to convert observatory name or id to coordinates used by JPL Horizons
+    Coordinate system is specified as 'geodetic longitude (deg), geodetic latitude (deg), altitude above reference ellipsoid (km)' 
+    See https://ssd.jpl.nasa.gov/horizons/manual.html#center for detailed documentation
+    """
+    observatory = observatory.upper()
+    if observatory == 'EVLA' or observatory == 'VLA' or observatory=='-5':
+        site_coord = '252.382,34.0788132,2.11447'
+    elif observatory == 'EOVSA' or observatory == 'FASR':
+        site_coord = '241.713,37.2332,1.20713'
+    elif observatory == 'OVRO_MMA' or observatory == "OVRO-LWA" or observatory == 'OVRO':
+        site_coord = '241.718406,37.240115,1.18835'
+    elif observatory == 'ALMA' or observatory == '-7':
+        site_coord = '292.2452521,-23.029211,5.07489'
+    elif observatory == 'GMRT' or observatory == 'uGMRT':
+        site_coord = '74.050508,19.093096,.60663'
+    elif observatory == 'geocentric' or observatory == '500':
+        site_coord = '0.0,0.0,-6378.137'
+    else:
+        print('Observatory {} not recognized. Assume OVRO.'.format(observatory))
+        site_coord = '241.718406,37.240115,1.18835'
+    return site_coord
+
+def read_horizons(t0=None, dur=None, vis=None, observatory=None, verbose=False, use_astropy=False):
     """
     This function visits JPL Horizons to retrieve J2000 topocentric RA and DEC of the solar disk center
     as a function of time.
@@ -99,70 +123,30 @@ def read_horizons(t0=None, dur=None, vis=None, observatory=None, verbose=False):
     observatory: observatory code (from JPL Horizons). If not provided, use information from visibility.
          if no visibility found, use earth center (code=500)
     verbose: True to provide extra information
+    use_astropy: whether or not to use astropy to obtain the empheris
 
     Usage:
     >>> from astropy.time import Time
     >>> out = read_horizons(t0=Time('2017-09-10 16:00:00'), observatory='-81')
     >>> out = read_horizons(vis = 'mydata.ms')
-
-    History:
-    BC (sometime in 2014): function was first wrote, followed by a number of edits by BC and SY
-    BC (2019-07-16): Added docstring documentation
-
-    '''
     
-=======
     """
-    if not t0 and not vis:
-        t0 = Time.now()
-    if not dur:
-        dur = 1. / 60. / 24.  # default to 1 minute
-    if t0:
-        try:
-            btime = Time(t0)
-            
-        except:
-            print('input time ' + str(t0) + ' not recognized')
-            return -1
-
-    if observatory:
-        # If "observatory" is provided, it takes precedence
-        # turn observatory names into JPL Horizons' codes
-        if observatory == 'EVLA' or observatory == '-5' or observatory=='VLA':
-            observatory = '-5'
-        elif observatory == 'EOVSA' or observatory == 'FASR' or observatory == 'OVRO_MMA' or observatory == '-81':
-            observatory = '-81'
-        elif observatory == 'ALMA' or observatory == '-7':
-            observatory = '-7'
-        elif observatory == 'GMRT' or observatory == 'uGMRT' or observatory == '399':
-            observatory = '399'
-        elif observatory == 'geocentric' or observatory == '500':
-            observatory = '500'
-        else:
-            print('Observatory {} not recognized. Assume geocentric.'.format(observatory))
-            observatory = '500'
+    from astropy.time import Time
 
     if vis:
         if not os.path.exists(vis):
             print('Input ms data ' + vis + ' does not exist! ')
             return -1
         try:
-            if not observatory:
-                ms.open(vis)
-                metadata = ms.metadata()
-                if metadata.observatorynames()[0] == 'EVLA':
-                    observatory = '-5'
-                elif metadata.observatorynames()[0] == 'EOVSA' or metadata.observatorynames()[0] == 'FASR' or metadata.observatorynames()[0] == 'OVRO_MMA':
-                    observatory = '-81'
-                elif metadata.observatorynames()[0] == 'GMRT' or metadata.observatorynames()[0] == 'uGMRT':
-                    observatory = '399'
-                elif metadata.observatorynames()[0] == 'ALMA':
-                    observatory = '-7'
-                else:
-                    print('Observatory {} not recognized. Assume geocentric.'.format(metadata.observatorynames()[0]))
-                    observatory = '500'
-                metadata.close()
-                ms.close()
+            ms.open(vis)
+            metadata = ms.metadata()
+            observatory_meta = metadata.observatorynames()[0]
+            metadata.close()
+            if verbose:
+                print('The observatory is {} in this visibility file'.format(observatory_meta))
+            if observatory is None:
+                observatory = observatory_meta
+            ms.close()
 
             tb.open(vis)
             btime_vis = Time(tb.getcell('TIME', 0) / 24. / 3600., format='mjd')
@@ -175,110 +159,163 @@ def read_horizons(t0=None, dur=None, vis=None, observatory=None, verbose=False):
             # extend the start and end time for jpl horizons by 0.5 hr on each end
             btime = Time(btime_vis.mjd - 0.5 / 24., format='mjd')
             dur = etime_vis.mjd - btime_vis.mjd + 1.0 / 24.
-        except:
+        except Exception as error:
+            print(error)
             print('error in reading ms file: ' + vis + ' to obtain the ephemeris!')
             return -1
 
-    # Neither observatory is defined or found through provided visibility. Assume geocentric.
-    if not observatory:
-        observatory = '500'
+    if use_astropy:
+        from sunpy.coordinates import sun
+        from astropy.coordinates import get_body, EarthLocation
 
-    # default the observatory to geocentric, if none provided
-    etime = Time(btime.mjd + dur, format='mjd')
-    
-    try:
-        cmdstr = "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&TABLE_TYPE='OBSERVER'&QUANTITIES='1,17,20'&CSV_FORMAT='YES'&ANG_FORMAT='DEG'&CAL_FORMAT='BOTH'&SOLAR_ELONG='0,180'&CENTER='{}@399'&COMMAND='sun'&START_TIME='".format(
-            observatory) + btime.iso.replace(' ', ',') + "'&STOP_TIME='" + etime.iso[:-4].replace(' ',
-                                                                                                  ',') + "'&STEP_SIZE='1m'&SKIP_DAYLT='NO'&EXTRA_PREC='YES'&APPARENT='REFRACTED'"
-        # cmdstr = "https://ssd.jpl.nasa.gov/horizons_batch.cgi?batch=1&TABLE_TYPE='OBSERVER'&QUANTITIES='1,17,20'&CSV_FORMAT='YES'&ANG_FORMAT='DEG'&CAL_FORMAT='BOTH'&SOLAR_ELONG='0,180'&CENTER='{}@399'&COMMAND='10'&START_TIME='".format(
-        #     observatory) + btime.iso.replace(' ', ',') + "'&STOP_TIME='" + etime.iso[:-4].replace(' ',
-        #                                                                                           ',') + "'&STEP_SIZE='1m'&SKIP_DAYLT='NO'&EXTRA_PREC='YES'&APPARENT='REFRACTED'"
-        cmdstr = cmdstr.replace("'", "%27")
-        # print('1################')
+        if observatory is None:
+            observatory = 'OVRO'
+
+        if not t0 and not vis:
+            t0 = Time.now()
+        if not dur:
+            dur = 1. / 60. / 24.  # default to 1 minute
+        if t0:
+            try:
+                btime = Time(t0)
+            except Exception as error:
+                print('input time ' + str(t0) + ' not recognized')
+                print(error)
+                return -1
+
+        JPL_AU = 149597870700.0  # meters
+        JPL_RSUN = 696000000.0   # meters
+
+        obstime = btime
+
+
+        if dur<=1e-6/3600/24: # robust for wild input of dur<=0
+            dur = 1e-6/3600/24
+
+        etime = Time(btime.mjd + dur, format='mjd')
+        times = Time(np.linspace(btime.mjd, etime.mjd, int(np.ceil(dur*24*60))), format='mjd')
+
+        time_set = []
+        ra_set = []
+        dec_set = []
+        p0_set = []
+        delta_set = []
+        for time in times:
+            # Get coordinates using astropy
+            location = EarthLocation.of_site(observatory)
+            phasecentre = get_body('sun', time, location)
+            ra = phasecentre.ra.to(u.rad).value
+            dec = phasecentre.dec.to(u.rad).value
+
+            # Get solar angles from sunpy
+            P = sun.P(time).to(u.deg).value
+            B0 = sun.B0(time).to(u.deg).value
+            L0 = sun.L0(time).to(u.deg).value
+            time_set.append(time)
+            ra_set.append(ra)
+            dec_set.append(dec)
+            p0_set.append(P)
+            delta_set.append(0)
+
+        ephem = {'time': time_set, 'ra': ra_set, 'dec': dec_set, 'p0': p0_set, 'delta': delta_set}
+
+    else:
+        if not t0 and not vis:
+            t0 = Time.now()
+        if not dur:
+            dur = 1. / 60. / 24.  # default to 1 minute
+        if t0:
+            try:
+                btime = Time(t0)
+            except Exception as error:
+                print('input time ' + str(t0) + ' not recognized')
+                print(error)
+                return -1
+
+        if observatory is None:
+            site_coord = observatory_to_coord('OVRO')
+        else:
+            # If "observatory" is provided, it takes precedence
+            if verbose:
+                print('Using observatory {} to generate emphemeris'.format(observatory))
+            site_coord = observatory_to_coord(observatory)
+
+        # default the observatory to geocentric, if none provided
+        etime = Time(btime.mjd + dur, format='mjd')
         
         try:
-            context = ssl._create_unverified_context()
-            f = urlopen(cmdstr, context=context)
-        except:
-            f = urlopen(cmdstr)
-        lines = f.readlines()
-        f.close()
-    except:
-        # todo use geocentric coordinate for the new VLA data
-        print ("here")
-        import requests, collections
-        params = collections.OrderedDict()
-        # params['batch'] = '1'
-        # params['TABLE_TYPE'] = "'OBSERVER'"
-        # params['QUANTITIES'] = "'1,17,20'"
-        # params['CSV_FORMAT'] = "'YES'"
-        # params['ANG_FORMAT'] = "'DEG'"
-        # params['CAL_FORMAT'] = "'BOTH'"
-        # params['SOLAR_ELONG'] = "'0,180'"
-        # if observatory == '500':
-        #     params['CENTER'] = "'500'"
-        # else:
-        #     params['CENTER'] = "'{}@399'".format(observatory)
-        # params['COMMAND'] = "'10'"
-        # params['START_TIME'] = "'{}'".format(btime.iso[:-4].replace(' ', ','))
-        # params['STOP_TIME'] = "'{}'".format(etime.iso[:-4].replace(' ', ','))
-        # params['STEP_SIZE'] = "'1m'"
-        # params['SKIP_DAYLT'] = "'NO'"
-        # params['EXTRA_PREC'] = "'YES'"
-        # params['APPAENT'] = "'REFRACTED'"
-        # results = requests.get("https://ssd.jpl.nasa.gov/horizons_batch.cgi", params=params)
+            cmdstr = "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&TABLE_TYPE='OBSERVER'&QUANTITIES='1,17,20'&CSV_FORMAT='YES'&ANG_FORMAT='DEG'&CAL_FORMAT='BOTH'&SOLAR_ELONG='0,180'&CENTER='coord@399'&COORD_TYPE='GEODETIC'&SITE_COORD='{}'&COMMAND='sun'&START_TIME='".format(
+                site_coord) + btime.iso.replace(' ', ',') + "'&STOP_TIME='" + etime.iso[:-4].replace(' ',
+                                                                                                    ',') + "'&STEP_SIZE='1m'&SKIP_DAYLT='NO'&EXTRA_PREC='YES'&APPARENT='REFRACTED'"
+            cmdstr = cmdstr.replace("'", "%27")
+            if verbose:
+                print('Query Horizons using the following url')
+                print(cmdstr)
+            # print('1################')
+            
+            try:
+                context = ssl._create_unverified_context()
+                f = urlopen(cmdstr, context=context)
+            except:
+                f = urlopen(cmdstr)
+            lines = f.readlines()
+            f.close()
+        except Exception as error:
+            # todo use geocentric coordinate for the new VLA data
+            print(error)
+            print ("Use an alternative method to query")
+            import requests, collections
+            params = collections.OrderedDict()
+            params['EPHEM_TYPE'] = "'OBSERVER'"
+            params['QUANTITIES'] = "'1,17,20'"
+            params['CSV_FORMAT'] = "'YES'"
+            params['ANG_FORMAT'] = "'DEG'"
+            params['CAL_FORMAT'] = "'BOTH'"
+            params['SOLAR_ELONG'] = "'0,180'"
+            params['CENTER'] = "coord@399"
+            params['COORD_TYPE'] = "GEODETIC"
+            params['SITE_COORD'] = "'{}'".format(site_coord)
+            params['COMMAND'] = "'sun'"
+            params['START_TIME'] = "'{}'".format(btime.iso[:-4].replace(' ', ','))
+            params['STOP_TIME'] = "'{}'".format(etime.iso[:-4].replace(' ', ','))
+            params['STEP_SIZE'] = "'1m'"
+            params['SKIP_DAYLT'] = "'NO'"
+            params['EXTRA_PREC'] = "'YES'"
+            params['APPARENT'] = "'REFRACTED'"
+            results = requests.get("https://ssd.jpl.nasa.gov/api/horizons.api?format=text", params=params)
+            # print('2################')
+            # print(results)
+            lines = [ll for ll in results.iter_lines()]
 
-        params['EPHEM_TYPE'] = "'OBSERVER'"
-        params['QUANTITIES'] = "'1,17,20'"
-        params['CSV_FORMAT'] = "'YES'"
-        params['ANG_FORMAT'] = "'DEG'"
-        params['CAL_FORMAT'] = "'BOTH'"
-        params['SOLAR_ELONG'] = "'0,180'"
-        if observatory == '500':
-            params['CENTER'] = "'500'"
-        else:
-            params['CENTER'] = "'{}@399'".format(observatory)
-        params['COMMAND'] = "'sun'"
-        params['START_TIME'] = "'{}'".format(btime.iso[:-4].replace(' ', ','))
-        params['STOP_TIME'] = "'{}'".format(etime.iso[:-4].replace(' ', ','))
-        params['STEP_SIZE'] = "'1m'"
-        params['SKIP_DAYLT'] = "'NO'"
-        params['EXTRA_PREC'] = "'YES'"
-        params['APPARENT'] = "'REFRACTED'"
-        results = requests.get("https://ssd.jpl.nasa.gov/api/horizons.api?format=text", params=params)
-        # print('2################')
-        # print(results)
-        lines = [ll for ll in results.iter_lines()]
+        # add a check for python 3
+        if py3:
+            lines = [l.decode('utf-8', 'backslashreplace') for l in lines]
 
-    # add a check for python 3
-    if py3:
-        lines = [l.decode('utf-8', 'backslashreplace') for l in lines]
-
-    #print(lines)
-    nline = len(lines)
-    istart = 0
-    for i in range(nline):
-        if lines[i][0:5] == '$$SOE':  # start recording
-            istart = i + 1
-        if lines[i][0:5] == '$$EOE':  # end recording
-            iend = i
-    newlines = lines[istart:iend]
-    nrec = len(newlines)
-    ephem_ = []
-    t = []
-    ra = []
-    dec = []
-    p0 = []
-    delta = []
-    for line in newlines:
-        items = line.split(',')
-        t.append(Time(float(items[1]), format='jd').mjd)
-        ra.append(np.radians(float(items[4])))
-        dec.append(np.radians(float(items[5])))
-        p0.append(float(items[6]))
-        delta.append(float(items[8]))
-    # convert list of dictionary to a dictionary of arrays
-    ephem = {'time': t, 'ra': ra, 'dec': dec, 'p0': p0, 'delta': delta}
+        #print(lines)
+        nline = len(lines)
+        istart = 0
+        for i in range(nline):
+            if lines[i][0:5] == '$$SOE':  # start recording
+                istart = i + 1
+            if lines[i][0:5] == '$$EOE':  # end recording
+                iend = i
+        newlines = lines[istart:iend]
+        nrec = len(newlines)
+        ephem_ = []
+        t = []
+        ra = []
+        dec = []
+        p0 = []
+        delta = []
+        for line in newlines:
+            items = line.split(',')
+            t.append(Time(float(items[1]), format='jd').mjd)
+            ra.append(np.radians(float(items[4])))
+            dec.append(np.radians(float(items[5])))
+            p0.append(float(items[6]))
+            delta.append(float(items[8]))
+        # convert list of dictionary to a dictionary of arrays
+        ephem = {'time': t, 'ra': ra, 'dec': dec, 'p0': p0, 'delta': delta}
     return ephem
 
 
@@ -657,20 +694,8 @@ def ephem_to_helio(vis=None, ephem=None, msinfo=None, reftime=None, dopolyfit=Tr
         # compare with ephemeris from JPL Horizons
         if not usephacenter:
             # Do not need to read the information from the measurement set
-            if msinfo0['observatory'] == 'EVLA':
-                observatory_id = '-5'
-            elif msinfo0['observatory'] == 'EOVSA' or msinfo0['observatory'] == 'FASR' or msinfo0['observatory'] == 'OVRO_MMA':
-                observatory_id = '-81'
-            elif msinfo0['observatory'] == 'GMRT' or msinfo0['observatory'] == 'uGMRT':
-                observatory_id = '399'
-            elif msinfo0['observatory'] == 'ALMA':
-                observatory_id = '-7'
-            else:
-                print('Observatory {} not recognized. Assume geocentric.'.format(msinfo0['observatory']))
-                observatory_id = '500'
-
             if not ephem:
-                ephem = read_horizons(Time(tref_d, format='mjd'), observatory=observatory_id)
+                ephem = read_horizons(Time(tref_d, format='mjd'), observatory=msinfo0['observatory'])
 
         times_ephem = ephem['time']
         ras_ephem = ephem['ra']
@@ -795,7 +820,7 @@ def getbeam(imagefile=None, beamfile=None):
                     bpa_.append(bpa0)
                 beamunit_ = beams['*' + chans_[0]]['*0']['major']['unit']
                 bpaunit_ = beams['*' + chans_[0]]['*0']['positionangle']['unit']
-            if 'restoringbeam' in sum.keys():  # only one beam
+            elif 'restoringbeam' in sum.keys():  # only one beam
                 bmaj_.append(sum['restoringbeam']['major']['value'])
                 bmin_.append(sum['restoringbeam']['minor']['value'])
                 bpa_.append(sum['restoringbeam']['positionangle']['value'])
@@ -803,6 +828,23 @@ def getbeam(imagefile=None, beamfile=None):
                 bpaunit_ = sum['restoringbeam']['positionangle']['unit']
                 nbeams = 1
                 chans_ = [0]
+            else:
+                if img.lower().endswith('.fits') or img.lower().endswith('.fts'):
+                    from astropy.io import fits
+                    hdulist = fits.open(img)
+                    if hdulist[0].header['BMAJ']<0:
+                        print(f'Warning: Negative beam size found in {img}. Set to positive value. Check your imaging results carefully!')
+                    bmaj0 = abs(hdulist[0].header['BMAJ'])*3600
+                    bmin0 = abs(hdulist[0].header['BMIN'])*3600
+                    bpa0 = hdulist[0].header['BPA']
+                    beamunit_ = 'arcsec'
+                    bpaunit_ = 'deg'
+                    hdulist.close()
+                    bmaj_.append(bmaj0)
+                    bmin_.append(bmin0)
+                    bpa_.append(bpa0)
+                    nbeams = 1
+                    chans_ = [0]
 
         bmaj.append(bmaj_)
         bmin.append(bmin_)
@@ -1253,16 +1295,7 @@ def calc_phasecenter_from_solxy(vis, timerange='', xycen=None, usemsphacenter=Tr
     '''
     ms.open(vis)
     metadata = ms.metadata()
-    if not observatory:
-        observatory = metadata.observatorynames()[0]
-        if metadata.observatorynames()[0] == 'EVLA':
-            observatory = '-5'
-        elif metadata.observatorynames()[0] == 'EOVSA' or metadata.observatorynames()[0] == 'FASR' or metadata.observatorynames()[0] == 'OVRO_MMA':
-            observatory = '-81'
-        elif metadata.observatorynames()[0] == 'GMRT' or metadata.observatorynames()[0] == 'uGMRT':
-            observatory_id = '399'
-        elif metadata.observatorynames()[0] == 'ALMA':
-            observatory = '-7'
+    observatory = metadata.observatorynames()[0]
        
     try:
         mstrange = metadata.timerangeforobs(0)
@@ -1345,7 +1378,8 @@ from astropy.io import fits
 import sunpy.map
 from sunpy.coordinates import frames, sun
 
-def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLocation(lat=37.232259*u.deg, lon=-118.28479*u.deg)):
+def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLocation(lat=37.232259*u.deg, lon=-118.28479*u.deg)
+                        , fov=None):
     """
         composing a sunpy compatible fits from a fits file with RA and DEC in the header
         using location of OVSA as example
@@ -1358,9 +1392,8 @@ def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLoc
 
     hdu = fits.open(fits_in)
     header = hdu[0].header
-    obstime = Time(header['date-obs'])
-
     data = hdu[0].data[0, 0, :, :]
+    obstime = Time(header['date-obs'])
     frequency = header['crval3']*u.Hz
     obs_gcrs = SkyCoord(obs_loc.get_gcrs(obstime))
     reference_coord = SkyCoord(header['crval1']*u.Unit(header['cunit1']),
@@ -1376,8 +1409,13 @@ def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLoc
         scale=u.Quantity([cdelt1, cdelt2]*u.arcsec/u.pix), wavelength=3e8/frequency.to(u.Hz).value*u.m,
         rotation_angle=-P1, observatory='obs')
     obsview_map = sunpy.map.Map(data, new_header)
-    fov_x = new_header["naxis1"]*cdelt1
-    fov_y = new_header["naxis2"]*cdelt2
+    
+    if fov is None:
+        fov_x = new_header["naxis1"]*cdelt1
+        fov_y = new_header["naxis2"]*cdelt2
+    else:
+        fov_x = fov[0]
+        fov_y = fov[1]
 
     obsview_map_rotate = obsview_map.rotate()
     bl = SkyCoord(-fov_x/2, -fov_y/2, frame=obsview_map_rotate.coordinate_frame)
@@ -1387,3 +1425,5 @@ def radec_fits_to_helio(fits_in, helio_sunpy_fits_name =None, obs_loc = EarthLoc
     if helio_sunpy_fits_name is None:
         helio_sunpy_fits_name = fits_in.replace('.fits', '_heliosunpy.fits')
     obsview_submap.save(helio_sunpy_fits_name, overwrite=True)
+
+    return helio_sunpy_fits_name

@@ -20,7 +20,7 @@ tb = tbtool()
 ms = mstool()
 qa = qatool()
 
-def get_bandinfo(msfile, spw=None, returnbdinfo=False):
+def get_bandinfo(msfile, spw=None, returnbdinfo=False, verbose=False):
     '''
     get center frequencies of all spectral windows for msfile
     spw: [option] return the cfreq of spw. spw can be a a string or a list of string.
@@ -55,7 +55,8 @@ def get_bandinfo(msfile, spw=None, returnbdinfo=False):
         freqbounds_hi_spw = []
         cfreqs_spw = []
         for sp in spw:
-            print(f'Parsing spw {sp}...')
+            if verbose:
+                print(f'Parsing spw {sp}...')
             try:
                 staql = {'spw': sp}
                 ms.selectinit(reset=True)
@@ -70,7 +71,8 @@ def get_bandinfo(msfile, spw=None, returnbdinfo=False):
                 efreq = (spwInfo[str(espw)]['Chan1Freq'] + spwInfo[str(espw)]['ChanWidth'] * echan) / 1e9
                 cfreq = (bfreq + efreq) / 2.
             except ValueError:
-                print("Parsing spw {} failed. Aborting...".format(sp))
+                if verbose:
+                    print("Parsing spw {} failed. Aborting...".format(sp))
                 continue
             freqbounds_lo_spw.append(bfreq)
             freqbounds_hi_spw.append(efreq)
@@ -414,3 +416,73 @@ def putmodel(vis, spw=None, model=None):
     subt.done()
     tb.done()
     return model_d
+
+
+from tqdm import tqdm
+import time
+
+
+def sort_polarization_order(msfile, outputvis):
+    """
+    Sort the polarization order in a measurement set to match the conventional order (XX, XY, YX, YY).
+
+    :param msfile: Path to the input measurement set file.
+                   defaults to None
+    :type msfile: str (optional)
+    :param outputvis: Path to the output measurement set file where the sorted data will be stored.
+                    defaults to None
+    :type outputvis: str (optional)
+    :raises OSError: If the output file cannot be created or copying fails.
+    :raises Exception: If an error occurs while processing the CASA tables.
+    :return: None
+    :rtype: None
+    """
+    # Remove existing outputvis if it exists
+    t_start = time.time()
+    if os.path.exists(outputvis):
+        os.system(f'rm -rf {outputvis}')
+
+    if os.system(f'cp -r {msfile} {outputvis}') != 0:
+        raise OSError("Failed to copy the MS file to the output location.")
+
+    try:
+        tb.open(outputvis + '/POLARIZATION/', nomodify=False)
+        corr_type = tb.getcol('CORR_TYPE')
+        corr_order = np.argsort(corr_type[:, 0])
+        sorted_corr_type = corr_type[corr_order]
+        tb.putcol('CORR_TYPE', sorted_corr_type)
+
+        corr_product = tb.getcol('CORR_PRODUCT')
+        sorted_corr_product = corr_product
+        for i in range(corr_product.shape[0]):
+            sorted_corr_product[i] = corr_product[i][corr_order]
+        tb.putcol('CORR_PRODUCT', sorted_corr_product)
+
+
+    except Exception as e:
+        print("An error occurred while sorting the polarization order in POLARIZATION table:", e)
+        raise
+    finally:
+        tb.close()
+
+    try:
+        tb.open(msfile)
+        nrows = tb.nrows()
+        data = []
+        for row in tqdm(range(nrows), desc=f'Extracting DATA column', ascii=True):
+            data.append(tb.getcell('DATA', row))
+        tb.close()
+
+        tb.open(outputvis, nomodify=False)
+        for row in tqdm(range(nrows), desc=f'writing DATA column', ascii=True):
+            tb.putcell('DATA', row, data[row][corr_order])
+        tb.close()
+    except Exception as e:
+        print("An error occurred while sorting the polarization order in DATA column:", e)
+        raise
+    finally:
+        tb.close()
+    t_end = time.time()
+    print(f"Sorting the polarization order in the measurement set took {(t_end - t_start) / 60:.1f} minutes.")
+    return outputvis
+
